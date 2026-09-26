@@ -21,6 +21,11 @@
 # 记录输出：verify-results/release-candidates/<UTC时间戳>.md + .json 双格式
 # （gitignore 覆盖 verify-results/；本目录不入库）。内容含：固定 40 位
 # commit、三要素、verify 段数与结果、构建命令清单与耗时、时间戳。
+# ISS-101 起 JSON schema 升 v2：新增可选字段 updater_tgz_sha256
+# （bundle/macos/Fathom.app.tar.gz 的 SHA256；本地无签名 key 的构建不产
+# updater 产物，该字段为 null），供 scripts/verify_release_gate.py 在
+# 发行门 C5 指纹层比对。v1 记录（无该字段）仍可被门接受（字段缺省时
+# 跳过该项比对）。
 #
 # 用法：
 #   bash scripts/release_candidate_record.sh [--selftest | --build]
@@ -368,6 +373,13 @@ collect_artifacts() {
   local helper_sha
   helper_sha="$(shasum -a 256 "$HELPER_BIN" | awk '{print $1}')"
 
+  # ISS-101：updater tar.gz 指纹（存在才采集；本地无签名 key 的构建
+  # 不产 updater 产物，置空并在记录里明示，发行门据此跳过该项比对）。
+  local updater_tgz_sha=""
+  if [ -f "$BUNDLE_ROOT/macos/Fathom.app.tar.gz" ]; then
+    updater_tgz_sha="$(shasum -a 256 "$BUNDLE_ROOT/macos/Fathom.app.tar.gz" | awk '{print $1}')"
+  fi
+
   # 三要素摘要打印
   printf '%s 三要素：commit=%s DMG_SHA256=%s helper_SHA256=%s\n' \
     "$LOG_PREFIX" "$(read_head_commit)" "$dmg_sha_actual" "$helper_sha"
@@ -377,6 +389,7 @@ collect_artifacts() {
   DMG_PATH="$dmg"
   DMG_SHA256="$dmg_sha_actual"
   HELPER_SHA256="$helper_sha"
+  UPDATER_TGZ_SHA256="$updater_tgz_sha"
 }
 
 # ---- verify 结果采集（最新 result.json） --------------------------------
@@ -468,6 +481,7 @@ write_records() {
 - **DMG SHA256**：${DMG_SHA256}
 - **helper 路径**：${HELPER_BIN}
 - **helper SHA256**：${HELPER_SHA256}
+- **updater tar.gz SHA256**：${UPDATER_TGZ_SHA256:-（本候选未产出 updater 产物）}
 - **verify 段数**：${VERIFY_PASSED:-?} passed / ${VERIFY_FAILED:-?} failed
 - **verify verdict**：${VERIFY_VERDICT:-?}
 - **构建命令清单**：
@@ -482,6 +496,7 @@ ${build_cmd_list}
 - commit: ${HEAD_COMMIT}
 - DMG_SHA256: ${DMG_SHA256}
 - helper_SHA256: ${HELPER_SHA256}
+- updater_tgz_SHA256: ${UPDATER_TGZ_SHA256:-none}
 - verify: ${VERIFY_PASSED:-?} passed / ${VERIFY_FAILED:-?} failed (${VERIFY_VERDICT:-?})
 - mode: ${MODE}
 - timestamp_utc: ${stamp}
@@ -496,19 +511,21 @@ PYEOF
   # 直接用 python 一次性生成 JSON，避免变量跨进 shell 子串的转义陷阱
   BUILD_ELAPSED_MS="$elapsed_ms" MODE="$MODE" STAMP="$stamp" \
   HEAD_COMMIT="$HEAD_COMMIT" DMG_PATH="$DMG_PATH" DMG_SHA256="$DMG_SHA256" \
-  HELPER_SHA256="$HELPER_SHA256" VERIFY_VERDICT="$VERIFY_VERDICT" \
+  HELPER_SHA256="$HELPER_SHA256" UPDATER_TGZ_SHA256="${UPDATER_TGZ_SHA256:-}" \
+  VERIFY_VERDICT="$VERIFY_VERDICT" \
   VERIFY_PASSED="$VERIFY_PASSED" VERIFY_FAILED="$VERIFY_FAILED" \
   python3 - "$js" <<'PYEOF'
 import datetime as dt, json, os, sys
 out_path = sys.argv[1]
 payload = {
-    "schema": "fathom.iss078.release-candidate.v1",
+    "schema": "fathom.iss078.release-candidate.v2",
     "timestamp_utc": os.environ["STAMP"],
     "mode": os.environ["MODE"],
     "head_commit": os.environ["HEAD_COMMIT"],
     "dmg_path": os.environ["DMG_PATH"],
     "dmg_sha256": os.environ["DMG_SHA256"],
     "helper_sha256": os.environ["HELPER_SHA256"],
+    "updater_tgz_sha256": os.environ["UPDATER_TGZ_SHA256"] or None,
     "verify": {
         "verdict": os.environ["VERIFY_VERDICT"],
         "passed": int(os.environ["VERIFY_PASSED"] or 0),
@@ -534,6 +551,7 @@ PYEOF
 - commit: ${HEAD_COMMIT}
 - DMG_SHA256: ${DMG_SHA256}
 - helper_SHA256: ${HELPER_SHA256}
+- updater_tgz_SHA256: ${UPDATER_TGZ_SHA256:-none}
 - verify: ${VERIFY_PASSED:-?} passed / ${VERIFY_FAILED:-?} failed (${VERIFY_VERDICT:-?})
 - mode: ${MODE}
 - timestamp_utc: ${stamp}

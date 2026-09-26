@@ -27,6 +27,16 @@
 #   上传前重跑同一门（合同要求"上传前 fail-closed"）。
 # - 第三方 action 固定完整 commit SHA（SHA 来源与 ci.yml 相同：取自
 #   api.github.com git/ref/tags，2026-09-13）。
+# - ISS-101 发行门（前置 release-gate job）：构建/上传前必须通过
+#   scripts/verify_release_gate.py 的合法候选判定——同 commit SHA 的
+#   CI run 存在且 conclusion=success、必需 job 恰为 ci.yml 当前清单
+#   （含矩阵展开）且逐个 success、tag 与单一版本源一致；dispatch 提供
+#   候选登记时另比对 DMG/helper/updater/manifest 指纹（候选更换/过期
+#   记录不得复用通过结论）。完整门合同与每类失败输入的 reason 表见
+#   脚本头注释。gap 背景：v0.3.4 commit 7da4bb3 的 CI run 36039169999
+#   失败但 Release run 36095495841 照常成功——release job 此前未绑定
+#   普通 CI 结果。负向验证入口：workflow_dispatch 的 probe_mode 输入
+#   （只跑发行门，构建/上传 job 按设计跳过，不创建/改动任何 Release）。
 # - 版本钉定与 ci.yml 同口径：Python 3.14.6（packaging/constraints.txt 锁定闭包）、
 #   Rust 1.88.0（rustup default）、tauri-cli 2.6.2（--locked，与本机及
 #   apps/desktop/src-tauri/Cargo.lock 的 tauri 2.x 系列一致）。
@@ -45,6 +55,25 @@ on:
         description: '发行 tag（vX.Y.Z，须已与单一版本源一致）'
         required: false
         type: string
+      # ---- ISS-101 探针输入（负向/正例验证专用；生产路径一律不填）----
+      probe_mode:
+        description: '探针模式：只跑发行门 job，构建/上传 job 按设计跳过（不产生任何 Release 写入）'
+        required: false
+        default: false
+        type: boolean
+      probe_commit:
+        description: '探针模式可选：检出该 40 位 SHA 替代 tag 检出（评估 (commit,tag) 组合的门逻辑）'
+        required: false
+        type: string
+      probe_unbound:
+        description: '探针模式可选：跳过 tag 到 commit 绑定（评估组合的其余门条件；生产禁用）'
+        required: false
+        default: false
+        type: boolean
+      candidate_record:
+        description: '可选：候选登记 JSON（release_candidate_record.sh 产物，建议 jq -c 单行化）；提供时上传前门比对制品指纹'
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -61,8 +90,101 @@ env:
   TAURI_CLI_VERSION: "2.6.2"
 
 jobs:
+  # ---- ISS-101 发行门（前置 job；tag push 与 workflow_dispatch 两条
+  # 路径都被本 job 覆盖：tag 目标 commit 的同 SHA 完整回归约束不成立即
+  # 失败，下方 build job 因 needs 不满足而跳过——构建/上传被门拦截，
+  # 不是打印警告）。门合同全文与 reason 表见
+  # scripts/verify_release_gate.py 头注释。
+  release-gate:
+    name: 发行门（同 SHA 完整回归约束）
+    runs-on: macos-15
+    timeout-minutes: 10
+    permissions:
+      # 最小权限：只读 checkout + 读 Actions runs/jobs（C3/C4 查询）。
+      # 构建 job 不在此列，仍继承 workflow 级 contents: write。
+      contents: read
+      actions: read
+    steps:
+      - name: 断言原生 runner 架构 arm64、tag 形态与探针输入
+        run: |
+          set -euo pipefail
+          echo "uname -m = $(uname -m)"
+          [ "$(uname -m)" = "arm64" ]
+          TAG="${TAG_INPUT:-$GITHUB_REF_NAME}"
+          case "$TAG" in
+            v[0-9]*.[0-9]*.[0-9]*)
+              ;;
+            *)
+              echo "[release] FAIL：tag '$TAG' 不匹配 vX.Y.Z 形态（dispatch 分支触发须填 tag 输入）" >&2
+              exit 1
+              ;;
+          esac
+          VER="${TAG#v}"
+          printf '%s' "$VER" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || {
+            echo "[release] FAIL：tag '$TAG' 去前缀后 '$VER' 非严格 X.Y.Z" >&2
+            exit 1
+          }
+          echo "RELEASE_TAG=$TAG" >> "$GITHUB_ENV"
+          echo "RELEASE_VERSION=$VER" >> "$GITHUB_ENV"
+          # 探针输入 fail-closed 校验：probe_commit 必须 40 位 hex SHA。
+          if [ -n "${PROBE_COMMIT:-}" ]; then
+            printf '%s' "$PROBE_COMMIT" | grep -Eq '^[0-9a-f]{40}$' || {
+              echo "[release] FAIL：probe_commit 不是 40 位 hex SHA：$PROBE_COMMIT" >&2
+              exit 1
+            }
+          fi
+          echo "probe_mode=${PROBE_MODE:-false} probe_commit=${PROBE_COMMIT:-（无）}"
+        env:
+          TAG_INPUT: ${{ inputs.tag }}
+          PROBE_COMMIT: ${{ inputs.probe_commit }}
+          PROBE_MODE: ${{ inputs.probe_mode }}
+
+      - name: 检出候选（tag 目标；探针模式可注入 commit）
+        # 顺序注意：根检出在前（根检出会清理整个工作区，若先检出
+        # gate-tools 会被清掉）；gate-tools 检出在后，只管理自己的子目录。
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: 'false'
+          # 生产路径：检出 tag，HEAD 即候选 commit（门以 HEAD 为判定对象）。
+          # 探针路径：检出注入的 probe_commit，评估 (commit, tag) 组合。
+          # tag push 事件 inputs.probe_commit 为空，自然回落 RELEASE_TAG。
+          ref: ${{ inputs.probe_commit || env.RELEASE_TAG }}
+
+      - name: 检出门脚本（workflow 触发 ref）
+        # 门脚本从「触发本 workflow 的 ref」取（dispatch 探针 = 本分支；
+        # tag push = tag 目标），与候选树解耦——评估旧 commit 候选时，
+        # 候选树里尚不存在本脚本（例如对 v0.3.4 做负向探针）。
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: 'false'
+          path: gate-tools
+          ref: ${{ github.sha }}
+
+      - name: 发行门（合法候选判定，fail-closed）
+        # cwd = 工作区根 = 候选树：门以候选树的 HEAD/版本源/ci.yml 为
+        # 判定对象；脚本本体用 gate-tools 内的副本执行。
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROBE_UNBOUND: ${{ inputs.probe_unbound }}
+        run: |
+          set -euo pipefail
+          ARGS=""
+          if [ "$PROBE_UNBOUND" = "true" ]; then
+            ARGS="--probe-unbound"
+          fi
+          # shellcheck disable=SC2086
+          python3 gate-tools/scripts/verify_release_gate.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --tag "$RELEASE_TAG" \
+            $ARGS
+
   build-arm64-draft:
     name: 构建 + draft Release（arm64 未签名）
+    needs: release-gate
+    # 探针模式：构建/上传 job 按设计跳过。负向探针的「构建/上传未继续」
+    # 证据 = 本 job 显示 Skipped；正例探针同样停在此处，不产生任何
+    # Release 写入（探针绝不 build、绝不 upload）。
+    if: inputs.probe_mode != true
     runs-on: macos-15
     timeout-minutes: 60
     steps:
@@ -251,6 +373,34 @@ jobs:
             *) echo "[release] FAIL：DMG 文件名 $DMG_NAME 未携带版本 $RELEASE_VERSION" >&2; exit 1 ;;
           esac
           echo "[release] 版本门（上传前）：通过（tag/单一源/DMG 文件名 = ${VER}）"
+
+      - name: 发行门（指纹层 + CI 绑定重断言，上传前）
+        # ISS-101：上传资产前重跑同一门——除 CI 绑定/版本绑定外，此处
+        # 激活 C5 指纹层：实测 DMG/helper/updater tar.gz/latest.json 的
+        # SHA256（GATE 行输出入日志，供候选登记与任务卡证据比对）；
+        # dispatch 提供候选登记 JSON 时逐一比对（候选更换/过期记录不得
+        # 复用通过结论）；manifest 版本必须等于 tag 版本。
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_RECORD: ${{ inputs.candidate_record }}
+        run: |
+          set -euo pipefail
+          STAGE="$RUNNER_TEMP/release-assets"
+          HELPER_BIN="$PWD/apps/desktop/src-tauri/target/release/bundle/macos/Fathom.app/Contents/Resources/helper/fathom-helper/fathom-helper"
+          REC_ARGS=""
+          if [ -n "$CANDIDATE_RECORD" ]; then
+            printf '%s' "$CANDIDATE_RECORD" > "$RUNNER_TEMP/candidate-record.json"
+            REC_ARGS="--record-json @$RUNNER_TEMP/candidate-record.json"
+          fi
+          # shellcheck disable=SC2086
+          python3 scripts/verify_release_gate.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --tag "$RELEASE_TAG" \
+            --dmg "$DMG" \
+            --helper "$HELPER_BIN" \
+            --updater-tgz "$STAGE/$TGZ_NAME" \
+            --manifest "$STAGE/latest.json" \
+            $REC_ARGS
 
       - name: 上传资产到 draft Release（绝不 publish）
         env:

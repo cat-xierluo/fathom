@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # ISS-031 可复现 pytest 入口（CI 与本地同一断言口径）。
 #
-# 本地等价命令（ISS-098 后 753 passed = 739 + 14(tests/test_upgrade_restore.py)；739 = 727 + 12(ISS-097)，727 = 720 + 7(ISS-096)）：
+# 本地等价命令（ISS-101 后 766 passed = 753 + 13(tests/test_release_gate.py)；753 = 739 + 14(tests/test_upgrade_restore.py)；739 = 727 + 12(ISS-097)，727 = 720 + 7(ISS-096)）：
 #   .runtime/bin/python -m pytest tests -q
 # CI：FATHOM_PYTHON 指向 setup-python 锁定版本创建的 venv 解释器。
 #
 # 断言口径：
 #   - fathom 源码必须来自当前工作区（TESTING 的防误测要求）；
 #   - pytest 非零退出（failed/error/收集失败）经 pipefail 直接判失败；
-#   - 通过数必须等于 EXPECTED_PYTEST_PASSED（默认 753）；计数变化必须
+#   - 通过数必须等于 EXPECTED_PYTEST_PASSED（默认 766）；计数变化必须
 #     显式同步本默认值与任务证据，不允许静默漂移。
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -32,8 +32,13 @@ cd "$(dirname "$0")/.."
 # 中断接续、正常升级材料保留至 finalize 才清、迁移失败闭环（db_verify_
 # failed → 停 N+1 → 从备份恢复库，CLI 链与 run_full 建模双钉）、三类
 # 故障注入（启动失败/身份不符/迁移失败真实进程链）与 lib.rs 恢复合同
-# 钉子（739 → 753）。
-expected="${EXPECTED_PYTEST_PASSED:-753}"
+# 钉子（739 → 753）；
+# ISS-101 +13：tests/test_release_gate.py 发行门聚焦单测——必需 job 清单
+# 与真实 ci.yml 一致（6 实例逐字）+ 矩阵展开与缺 name 回退、解析
+# fail-closed 三反例、候选登记/制品指纹四反例（更换/缺制品/commit 不符/
+# manifest 版本不符）+ manifest 非法 JSON、非 git 目录阻塞、--selftest
+# 全绿（753 → 766）。
+expected="${EXPECTED_PYTEST_PASSED:-766}"
 py="${FATHOM_PYTHON:-.runtime/bin/python}"
 
 if [ ! -x "$py" ]; then

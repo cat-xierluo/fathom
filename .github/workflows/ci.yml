@@ -34,10 +34,14 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # 已验证基线（ISS-098 后 753 passed = 739 + 14(tests/test_upgrade_restore.py
-  # 安装后失败的真实旧 bundle 与数据恢复聚焦测试)；739 = 727 + 12(ISS-097
+  # 已验证基线（ISS-101 后 766 passed = 753 + 13(tests/test_release_gate.py
+  # 发行门聚焦单测：必需 job 清单与 ci.yml 一致（6 实例逐字）/矩阵展开与
+  # 缺 name 回退/解析 fail-closed 三反例/候选登记与制品指纹反例/manifest
+  # 版本不符与非法 JSON/非 git 目录阻塞/--selftest 全绿)；753 = 739 + 14
+  # (tests/test_upgrade_restore.py 安装后失败的真实旧 bundle 与数据恢复
+  # 聚焦测试)；739 = 727 + 12(ISS-097
   # 升级事务聚焦测试)，727 = 720 + 7(ISS-096)，720 已含 ISS-030A/040B/040C/
-  # 037/081/090/091 批次）：753 pytest、39 API/浏览器检查、160 前端
+  # 037/081/090/091 批次）：766 pytest、39 API/浏览器检查、160 前端
   # refresh（ISS-100 起随浏览器 job 执行）、cargo locked offline build +
   # 单测 60（ISS-100 起随 cargo job 执行；ISS-098 只更新既有 argv 断言、
   # 数量不变）。
@@ -45,7 +49,7 @@ env:
   NODE_VERSION: "22.22.3"
   RUST_VERSION: "1.88.0"
   PLAYWRIGHT_VERSION: "1.61.1"
-  EXPECTED_PYTEST_PASSED: "753"
+  EXPECTED_PYTEST_PASSED: "766"
   EXPECTED_BROWSER_PASSED: "39"
   EXPECTED_REFRESH_PASSED: "160"
   EXPECTED_CARGO_PASSED: "60"
